@@ -277,7 +277,7 @@ class MACNetwork(nn.Module):
 
         self.input_unit = InputUnit(cfg, vocab_size=encoder_vocab_size)
 
-        self.output_unit = OutputUnit()
+        self.output_unit = OutputUnit(num_answers=self.cfg.TRAIN.NUM_ANSWERS)
 
         self.mac = MACUnit(cfg, max_step=max_step)
 
