@@ -1,9 +1,11 @@
 import torch
 import torch.nn as nn
 import torch.nn.init as init
+from torch.nn import functional as F
+import numpy as np
 from torch.autograd import Variable
-
-from utils import *
+from pprint import pprint
+from .utils import init_modules
 
 
 def load_MAC(cfg, vocab):
@@ -81,8 +83,6 @@ class ControlUnit(nn.Module):
         next_control = (attn * context).sum(1)
 
         return next_control
-
-
 class ReadUnit(nn.Module):
     def __init__(self, module_dim):
         super().__init__()
@@ -186,20 +186,90 @@ class MACUnit(nn.Module):
 
         return initial_control, initial_memory, memDpMask
 
-    def forward(self, context, question, knowledge, question_lengths):
-        batch_size = question.size(0)
-        control, memory, memDpMask = self.zero_state(batch_size, question)
+    def forward(self, qword_emb, qemb, knowledge, question_lengths):  
+        batch_size = qemb.size(0)
+        control, memory, memDpMask = self.zero_state(batch_size, qemb)
 
         for i in range(self.max_step):
             # control unit
-            control = self.control(question, context, question_lengths, i)
+            control = self.control(qemb, qword_emb, question_lengths, i)
             # read unit
             info = self.read(memory, knowledge, control, memDpMask)
             # write unit
             memory = self.write(memory, info)
 
-        return memory
+        return memory, control
 
+class ReferrentMACUnit(MACUnit):
+    def __init__(self, cfg, module_dim=512, max_step=4):
+        super(ReferrentMACUnit, self).__init__(cfg, module_dim=module_dim, max_step=max_step)
+        self.kq_proj = nn.Linear(module_dim, module_dim)
+        self.val_proj = nn.Linear(module_dim, module_dim)
+        
+    def norm_and_reshape(self, T, new_shape):
+        normedT = T / torch.norm(T, dim=1, keepdim=True)
+        normedT = normedT.view(*new_shape)        
+        normedT = torch.transpose(normedT, 1, 0)
+        return normedT
+
+    def compute_triu_mask(self, T):
+        with torch.no_grad():
+            maks_idxs = torch.triu_indices(T, T, 1)
+            mask = torch.zeros((T,T))
+            mask[maks_idxs[0],maks_idxs[1]] = -float('inf')
+            mask = mask.unsqueeze(0)
+        return mask
+    
+    def compute_general_attention(self, X, Y, mask):
+        E = torch.bmm(X, Y.transpose(1,2))
+        masked_E = E + mask
+        A = torch.softmax(masked_E, dim=2)
+        return A
+
+    def forward(self, qword_emb, qemb, knowledge, question_lengths):
+        batch_size = qemb.size(0)
+        control, memory, memDpMask = self.zero_state(batch_size, qemb)
+
+        control_history = []
+
+        for i in range(self.max_step):
+            # control unit
+            control = self.control(qemb, qword_emb, question_lengths, i)
+            control_history.append(control)
+        control_history = torch.stack(control_history, 1)
+
+        true_bs = question_lengths.shape[1]
+        T = question_lengths.shape[0]        
+
+        ch_key = self.kq_proj(control_history)
+        new_shape = (T, true_bs, ch_key.shape[1], ch_key.shape[2])
+        normed_ch_key = self.norm_and_reshape(ch_key, new_shape)
+
+        normed_ch_key = normed_ch_key.contiguous().view(normed_ch_key.shape[0], normed_ch_key.shape[1]*normed_ch_key.shape[2], normed_ch_key.shape[3])
+        mask = self.compute_triu_mask(normed_ch_key.shape[1]).to(normed_ch_key.device)
+        A = self.compute_general_attention(normed_ch_key, normed_ch_key, mask)      
+        
+        ch_val = self.val_proj(control_history)
+        new_shape = (T, true_bs, ch_val.shape[1], ch_val.shape[2])
+        ch_val = ch_val.view(*new_shape)
+        ch_val = ch_val.transpose(1,0)
+        ch_val = ch_val.contiguous().view(ch_val.shape[0], ch_val.shape[1]*ch_val.shape[2], ch_val.shape[3])
+        
+        attended_ch_val = torch.bmm(A, ch_val)
+        attended_ch_val = attended_ch_val.view(true_bs, T, new_shape[2], new_shape[3])
+        attended_ch_val = attended_ch_val.transpose(0,1)
+        attended_ch_val = attended_ch_val.contiguous().view(T*true_bs, self.max_step, -1)
+        
+        for i in range(self.max_step):
+            # control unit
+            control = attended_ch_val[:, i]
+            # control = control_history[:, i]
+            # read unit
+            info = self.read(memory, knowledge, control, memDpMask)
+            # write unit
+            memory = self.write(memory, info)
+
+        return memory, control
 
 class InputUnit(nn.Module):
     def __init__(self, cfg, vocab_size, wordvec_dim=300, rnn_dim=512, module_dim=512, bidirectional=True):
@@ -225,6 +295,11 @@ class InputUnit(nn.Module):
         self.question_dropout = nn.Dropout(p=0.08)
 
     def forward(self, image, question, question_len):
+        
+        if self.cfg.TRAIN.CLEVR_DIALOG:
+            image = image.repeat((question.shape[0], 1, 1, 1))
+            question = question.view(-1, question.shape[2])
+            question_len = question_len.view(-1)
         b_size = question.size(0)
 
         # get image features
@@ -235,7 +310,7 @@ class InputUnit(nn.Module):
         # get question and contextual word embeddings
         embed = self.encoder_embed(question)
         embed = self.embedding_dropout(embed)
-        embed = nn.utils.rnn.pack_padded_sequence(embed, question_len, batch_first=True)
+        embed = nn.utils.rnn.pack_padded_sequence(embed, question_len, batch_first=True, enforce_sorted=False)
 
         contextual_words, (question_embedding, _) = self.encoder(embed)
         if self.bidirectional:
@@ -279,7 +354,10 @@ class MACNetwork(nn.Module):
 
         self.output_unit = OutputUnit(num_answers=self.cfg.TRAIN.NUM_ANSWERS)
 
-        self.mac = MACUnit(cfg, max_step=max_step)
+        if self.cfg.TRAIN.CLEVR_DIALOG:
+            self.mac = ReferrentMACUnit(cfg, max_step=max_step)
+        else:
+            self.mac = MACUnit(cfg, max_step=max_step)
 
         init_modules(self.modules(), w_init=self.cfg.TRAIN.WEIGHT_INIT)
         nn.init.uniform_(self.input_unit.encoder_embed.weight, -1.0, 1.0)
@@ -290,7 +368,7 @@ class MACNetwork(nn.Module):
         question_embedding, contextual_words, img = self.input_unit(image, question, question_len)
 
         # apply MacCell
-        memory = self.mac(contextual_words, question_embedding, img, question_len)
+        memory,_ = self.mac(contextual_words, question_embedding, img, question_len)
 
         # get classification
         out = self.output_unit(question_embedding, memory)
