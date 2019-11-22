@@ -50,7 +50,7 @@ class ControlUnit(nn.Module):
         mask = (ones - mask) * (1e-30)
         return mask
 
-    def forward(self, question, context, question_lengths, step):
+    def forward(self, question, context, control, question_lengths, step):
         """
         Args:
             question: external inputs to control unit (the question vector).
@@ -64,6 +64,7 @@ class ControlUnit(nn.Module):
         """
         # compute interactions with question words
         question = self.control_input(question)
+        # question = torch.cat([control, question], dim=1)
         question = self.control_input_u[step](question)
 
         newContControl = question
@@ -188,11 +189,10 @@ class MACUnit(nn.Module):
 
     def forward(self, qword_emb, qemb, knowledge, question_lengths):  
         batch_size = qemb.size(0)
-        control, memory, memDpMask = self.zero_state(batch_size, qemb)
-
+        control, memory, memDpMask = self.zero_state(batch_size, qemb)        
         for i in range(self.max_step):
             # control unit
-            control = self.control(qemb, qword_emb, question_lengths, i)
+            control = self.control(qemb, qword_emb, control, question_lengths, i)
             # read unit
             info = self.read(memory, knowledge, control, memDpMask)
             # write unit
@@ -207,9 +207,7 @@ class ReferrentMACUnit(MACUnit):
         self.val_proj = nn.Linear(module_dim, module_dim)
         
     def norm_and_reshape(self, T, new_shape):
-        normedT = T / torch.norm(T, dim=1, keepdim=True)
-        normedT = normedT.view(*new_shape)        
-        normedT = torch.transpose(normedT, 1, 0)
+        
         return normedT
 
     def compute_triu_mask(self, T):
@@ -225,7 +223,7 @@ class ReferrentMACUnit(MACUnit):
         masked_E = E + mask
         A = torch.softmax(masked_E, dim=2)
         return A
-
+    
     def forward(self, qword_emb, qemb, knowledge, question_lengths):
         batch_size = qemb.size(0)
         control, memory, memDpMask = self.zero_state(batch_size, qemb)
@@ -234,31 +232,39 @@ class ReferrentMACUnit(MACUnit):
 
         for i in range(self.max_step):
             # control unit
-            control = self.control(qemb, qword_emb, question_lengths, i)
+            control = self.control(qemb, qword_emb, control, question_lengths, i)
             control_history.append(control)
         control_history = torch.stack(control_history, 1)
+        # print('control_history.shape', control_history.shape)
 
         true_bs = question_lengths.shape[1]
         T = question_lengths.shape[0]        
 
-        ch_key = self.kq_proj(control_history)
-        new_shape = (T, true_bs, ch_key.shape[1], ch_key.shape[2])
-        normed_ch_key = self.norm_and_reshape(ch_key, new_shape)
-
-        normed_ch_key = normed_ch_key.contiguous().view(normed_ch_key.shape[0], normed_ch_key.shape[1]*normed_ch_key.shape[2], normed_ch_key.shape[3])
-        mask = self.compute_triu_mask(normed_ch_key.shape[1]).to(normed_ch_key.device)
-        A = self.compute_general_attention(normed_ch_key, normed_ch_key, mask)      
         
+        ch_key = self.kq_proj(control_history)
+        new_shape = (T, true_bs, self.max_step, self.module_dim)
+        normed_ch_key = ch_key / torch.norm(ch_key, dim=1, keepdim=True)
+        normed_ch_key = normed_ch_key.view(*new_shape)        
+        normed_ch_key = torch.transpose(normed_ch_key, 1, 0)
+        # print('normed_ch_key.shape', normed_ch_key.shape)
+
+        normed_ch_key = normed_ch_key.contiguous().view(true_bs, T*self.max_step, self.module_dim)
+        mask = self.compute_triu_mask(T*self.max_step).to(normed_ch_key.device)
+        A = self.compute_general_attention(normed_ch_key, normed_ch_key, mask)      
+        # print('A.shape',A.shape)
+
         ch_val = self.val_proj(control_history)
-        new_shape = (T, true_bs, ch_val.shape[1], ch_val.shape[2])
+        new_shape = (T, true_bs, self.max_step, self.module_dim)
         ch_val = ch_val.view(*new_shape)
         ch_val = ch_val.transpose(1,0)
-        ch_val = ch_val.contiguous().view(ch_val.shape[0], ch_val.shape[1]*ch_val.shape[2], ch_val.shape[3])
+        ch_val = ch_val.contiguous().view(true_bs, T*self.max_step, self.module_dim)
+        # print('ch_val.shape', ch_val.shape)
         
         attended_ch_val = torch.bmm(A, ch_val)
-        attended_ch_val = attended_ch_val.view(true_bs, T, new_shape[2], new_shape[3])
+        attended_ch_val = attended_ch_val.view(true_bs, T, self.max_step, self.module_dim)
         attended_ch_val = attended_ch_val.transpose(0,1)
         attended_ch_val = attended_ch_val.contiguous().view(T*true_bs, self.max_step, -1)
+        # print('attended_ch_val.shape', attended_ch_val.shape)
         
         for i in range(self.max_step):
             # control unit
