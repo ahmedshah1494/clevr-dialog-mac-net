@@ -206,12 +206,23 @@ class MACUnit(nn.Module):
 class ReferrentMACUnit(MACUnit):
     def __init__(self, cfg, module_dim=512, max_step=4):
         super(ReferrentMACUnit, self).__init__(cfg, module_dim=module_dim, max_step=max_step)
-        self.kq_proj = nn.Linear(module_dim, (2 if cfg.TRAIN.USE_QUERY_PROJ else 1)*module_dim)
+        if cfg.TRAIN.USE_TURN_EMBED:
+            self.turn_embed = nn.Parameter(torch.rand((cfg.TRAIN.MAX_TURNS, 
+                                                        cfg.TRAIN.TURN_EMBED_DIM), 
+                                            requires_grad=True))
+            self.step_embed = nn.Parameter(torch.rand((max_step, 
+                                                        cfg.TRAIN.TURN_EMBED_DIM), 
+                                            requires_grad=True))
+            self.kq_proj = nn.Linear(module_dim+2*cfg.TRAIN.TURN_EMBED_DIM, (2 if cfg.TRAIN.USE_QUERY_PROJ else 1)*module_dim)
+        else:
+            self.kq_proj = nn.Linear(module_dim, (2 if cfg.TRAIN.USE_QUERY_PROJ else 1)*module_dim)
         self.val_proj = nn.Linear(module_dim, module_dim)
-        self.gate = nn.Sequential(
-                        nn.Linear(module_dim, 1),
-                        nn.Sigmoid()
-        )
+        
+        if cfg.TRAIN.GATE_CONTROL_ATTN:
+            self.gate = nn.Sequential(
+                            nn.Linear(module_dim, 1),
+                            nn.Sigmoid()
+            )        
 
     def compute_triu_mask(self, T):
         with torch.no_grad():
@@ -230,7 +241,7 @@ class ReferrentMACUnit(MACUnit):
     def compute_attended_control(self, control_history, true_bs, T):
         control_history = torch.stack(control_history, 1)
         # print('control_history.shape', control_history.shape)
-
+        
         ch_proj = self.kq_proj(control_history)
         ch_proj = ch_proj.view(-1, self.module_dim)
         normed_ch_proj = ch_proj / torch.norm(ch_proj, dim=1, keepdim=True)
@@ -269,10 +280,12 @@ class ReferrentMACUnit(MACUnit):
         attended_ch_val = attended_ch_val.contiguous().view(T*true_bs, self.max_step, -1)
         # print('attended_ch_val.shape', attended_ch_val.shape)
         # return attended_ch_val
-
-        alpha = self.gate(control_history)
-        gated_ch_val = alpha * control_history + (1-alpha) * attended_ch_val
-        return gated_ch_val
+        if self.cfg.TRAIN.GATE_CONTROL_ATTN:
+            alpha = self.gate(control_history)
+            gated_ch_val = alpha * control_history + (1-alpha) * attended_ch_val
+            return gated_ch_val
+        else:
+            return attended_ch_val
         
 
     def forward(self, qword_emb, qemb, knowledge, question_lengths):
