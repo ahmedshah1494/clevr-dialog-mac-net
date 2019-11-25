@@ -206,7 +206,7 @@ class MACUnit(nn.Module):
 class ReferrentMACUnit(MACUnit):
     def __init__(self, cfg, module_dim=512, max_step=4):
         super(ReferrentMACUnit, self).__init__(cfg, module_dim=module_dim, max_step=max_step)
-        self.kq_proj = nn.Linear(module_dim, module_dim)
+        self.kq_proj = nn.Linear(module_dim, (2 if cfg.TRAIN.USE_QUERY_PROJ else 1)*module_dim)
         self.val_proj = nn.Linear(module_dim, module_dim)
         self.gate = nn.Sequential(
                         nn.Linear(module_dim, 1),
@@ -231,18 +231,29 @@ class ReferrentMACUnit(MACUnit):
         control_history = torch.stack(control_history, 1)
         # print('control_history.shape', control_history.shape)
 
-        ch_key = self.kq_proj(control_history)
-        ch_key = ch_key.view(-1, self.module_dim)
-        normed_ch_key = ch_key / torch.norm(ch_key, dim=1, keepdim=True)
+        ch_proj = self.kq_proj(control_history)
+        ch_proj = ch_proj.view(-1, self.module_dim)
+        normed_ch_proj = ch_proj / torch.norm(ch_proj, dim=1, keepdim=True)
         
-        new_shape = (T, true_bs, self.max_step, self.module_dim)
-        normed_ch_key = normed_ch_key.view(*new_shape)        
-        normed_ch_key = torch.transpose(normed_ch_key, 1, 0)
+        normed_ch_proj = normed_ch_proj.view(T, 
+                                            true_bs, 
+                                            self.max_step, 
+                                            (2 if self.cfg.TRAIN.USE_QUERY_PROJ else 1), 
+                                            self.module_dim)
+        normed_ch_proj = torch.transpose(normed_ch_proj, 1, 0)
         # print('normed_ch_key.shape', normed_ch_key.shape)
 
+        if self.cfg.TRAIN.USE_QUERY_PROJ:
+            normed_ch_key = normed_ch_proj[:,:,:,0]
+            normed_ch_query = normed_ch_proj[:,:,:,1]
+        else:
+            normed_ch_key = normed_ch_query = normed_ch_proj
+
         normed_ch_key = normed_ch_key.contiguous().view(true_bs, T*self.max_step, self.module_dim)
+        normed_ch_query = normed_ch_query.contiguous().view(true_bs, T*self.max_step, self.module_dim)
+
         mask = self.compute_triu_mask(T*self.max_step).to(normed_ch_key.device)
-        A = self.compute_general_attention(normed_ch_key, normed_ch_key, mask)      
+        A = self.compute_general_attention(normed_ch_key, normed_ch_query, mask)
         # print('A.shape',A.shape)
 
         ch_val = self.val_proj(control_history)
@@ -316,7 +327,7 @@ class InputUnit(nn.Module):
     def forward(self, image, question, question_len):
         
         if self.cfg.TRAIN.CLEVR_DIALOG:
-            image = image.repeat((question.shape[0], 1, 1, 1))
+            image = image.repeat((question.shape[0], 1, 1, 1))               
             question = question.view(-1, question.shape[2])
             question_len = question_len.view(-1)
         b_size = question.size(0)
