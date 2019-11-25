@@ -38,8 +38,10 @@ class ControlUnit(nn.Module):
 
         self.control_input_u = nn.ModuleList()
         for i in range(max_step):
-            self.control_input_u.append(nn.Linear(module_dim, module_dim))
-
+            if cfg.TRAIN.USE_PREV_CONTROL:
+                self.control_input_u.append(nn.Linear(2*module_dim, module_dim))
+            else:
+                self.control_input_u.append(nn.Linear(module_dim, module_dim))
         self.module_dim = module_dim
 
     def mask(self, question_lengths, device):
@@ -64,7 +66,8 @@ class ControlUnit(nn.Module):
         """
         # compute interactions with question words
         question = self.control_input(question)
-        # question = torch.cat([control, question], dim=1)
+        if self.cfg.TRAIN.USE_PREV_CONTROL:
+            question = torch.cat([control, question], dim=1)
         question = self.control_input_u[step](question)
 
         newContControl = question
@@ -205,10 +208,10 @@ class ReferrentMACUnit(MACUnit):
         super(ReferrentMACUnit, self).__init__(cfg, module_dim=module_dim, max_step=max_step)
         self.kq_proj = nn.Linear(module_dim, module_dim)
         self.val_proj = nn.Linear(module_dim, module_dim)
-        
-    def norm_and_reshape(self, T, new_shape):
-        
-        return normedT
+        self.gate = nn.Sequential(
+                        nn.Linear(module_dim, 1),
+                        nn.Sigmoid()
+        )
 
     def compute_triu_mask(self, T):
         with torch.no_grad():
@@ -224,26 +227,15 @@ class ReferrentMACUnit(MACUnit):
         A = torch.softmax(masked_E, dim=2)
         return A
     
-    def forward(self, qword_emb, qemb, knowledge, question_lengths):
-        batch_size = qemb.size(0)
-        control, memory, memDpMask = self.zero_state(batch_size, qemb)
-
-        control_history = []
-
-        for i in range(self.max_step):
-            # control unit
-            control = self.control(qemb, qword_emb, control, question_lengths, i)
-            control_history.append(control)
+    def compute_attended_control(self, control_history, true_bs, T):
         control_history = torch.stack(control_history, 1)
         # print('control_history.shape', control_history.shape)
 
-        true_bs = question_lengths.shape[1]
-        T = question_lengths.shape[0]        
-
-        
         ch_key = self.kq_proj(control_history)
-        new_shape = (T, true_bs, self.max_step, self.module_dim)
+        ch_key = ch_key.view(-1, self.module_dim)
         normed_ch_key = ch_key / torch.norm(ch_key, dim=1, keepdim=True)
+        
+        new_shape = (T, true_bs, self.max_step, self.module_dim)
         normed_ch_key = normed_ch_key.view(*new_shape)        
         normed_ch_key = torch.transpose(normed_ch_key, 1, 0)
         # print('normed_ch_key.shape', normed_ch_key.shape)
@@ -265,6 +257,27 @@ class ReferrentMACUnit(MACUnit):
         attended_ch_val = attended_ch_val.transpose(0,1)
         attended_ch_val = attended_ch_val.contiguous().view(T*true_bs, self.max_step, -1)
         # print('attended_ch_val.shape', attended_ch_val.shape)
+        # return attended_ch_val
+
+        alpha = self.gate(control_history)
+        gated_ch_val = alpha * control_history + (1-alpha) * attended_ch_val
+        return gated_ch_val
+        
+
+    def forward(self, qword_emb, qemb, knowledge, question_lengths):
+        batch_size = qemb.size(0)
+        control, memory, memDpMask = self.zero_state(batch_size, qemb)
+
+        control_history = []
+
+        for i in range(self.max_step):
+            # control unit
+            control = self.control(qemb, qword_emb, control, question_lengths, i)
+            control_history.append(control)
+        
+        true_bs = question_lengths.shape[1]
+        T = question_lengths.shape[0]        
+        attended_ch_val = self.compute_attended_control(control_history, true_bs, T)
         
         for i in range(self.max_step):
             # control unit
