@@ -20,7 +20,7 @@ import h5py
 import re
 import random
 
-from config import cfg
+from code.config import cfg
 
 
 class ClevrDataset(data.Dataset):
@@ -48,7 +48,8 @@ def collate_fn(batch):
     max_len = max(map(lambda x: len(x[1]), batch))
 
     questions = np.zeros((batch_size, max_len), dtype=np.int64)
-    sort_by_len = sorted(batch, key=lambda x: len(x[1]), reverse=True)
+    sort_by_len = batch
+    # sort_by_len = sorted(batch, key=lambda x: len(x[1]), reverse=True)
 
     for i, b in enumerate(sort_by_len):
         image, question, length, answer, family = b
@@ -60,3 +61,39 @@ def collate_fn(batch):
 
     return {'image': torch.stack(images), 'question': torch.from_numpy(questions),
             'answer': torch.LongTensor(answers), 'question_length': lengths}
+
+class ClevrDialogDataset(ClevrDataset):
+    def __init__(self, data_dir, split='train'):
+        super(ClevrDialogDataset, self).__init__(data_dir, split)
+    
+    def __getitem__(self, index):
+        imgfile, questions, answers, templates = self.data[index]
+        id = int(imgfile.rsplit('_', 1)[1][:-4])
+        img = torch.from_numpy(self.img[id])
+
+        return img, questions, [len(q) for q in questions], answers, templates
+    
+    @staticmethod
+    def collate_fn(batch):
+        images = []
+        batch_size = len(batch)
+
+        max_len = -1
+        for b in batch:
+            max_len = max(max_len, max(b[2]))
+
+        questions = np.zeros((10, batch_size, max_len), dtype=np.int64)
+        question_lens = np.zeros((10, batch_size))
+        answers = np.zeros((10, batch_size), dtype=np.int64)
+
+        for i,b in enumerate(batch):
+            img, qs, lens, ans, _ = b
+            images.append(img)
+
+            for j, (q, l, a) in enumerate(zip(qs, lens, ans)):
+                questions[j, i, :l] = q
+                question_lens[j, i] = l
+                answers[j, i] = a
+        
+        return {'image': torch.stack(images), 'question': torch.from_numpy(questions),
+                'answer': torch.LongTensor(answers.flatten()), 'question_length': torch.LongTensor(question_lens)}

@@ -35,7 +35,7 @@ question_templates= [
 
 VAL_SIZE = 1000
 
-def process_question(root, split, word_dic=None, answer_dic=None):
+def process_question(root, split, word_dic=None, answer_dic=None, concat_ctx=False):
     if word_dic is None:
         word_dic = {'pad':0}
 
@@ -66,6 +66,8 @@ def process_question(root, split, word_dic=None, answer_dic=None):
             answers = []
             question_temps = []
 
+            if concat_ctx:
+                qtoks = ctoks
             for turn in dialog_datum['dialog']:
                 question = turn['question']
                 answer = turn['answer']
@@ -78,20 +80,25 @@ def process_question(root, split, word_dic=None, answer_dic=None):
 
                 assert question_temp_idx >= 0
 
-                qwords = nltk.word_tokenize(question)                
-                qtoks = [word_dic.setdefault(w, len(word_dic)) for w in qwords]
+                qwords = nltk.word_tokenize(question)
+                if concat_ctx:
+                    qtoks.extend([word_dic.setdefault(w, len(word_dic)) for w in qwords])
+                else:
+                    qtoks = [word_dic.setdefault(w, len(word_dic)) for w in qwords]
                 
-                if questions == []:
-                    qtoks = ctoks + qtoks
+                    if questions == []:
+                        qtoks = ctoks + qtoks
                 
-                word_dic.setdefault(answer, len(word_dic))
+                atok = word_dic.setdefault(answer, len(word_dic))                
            
                 answer_idx = answer_dic.setdefault(answer, len(answer_dic))
                 
-                questions.append(qtoks)
+                questions.append(deepcopy(qtoks))
                 answers.append(answer_idx)
                 question_temps.append(question_temp_idx)
-
+                
+                if concat_ctx:
+                    qtoks.append(atok)
             result.append((img_filename, questions, answers, question_temps))
     with open('{}/{}.pkl'.format(data_dir, split), 'wb') as f:
         pickle.dump(result, f)
@@ -101,15 +108,17 @@ def process_question(root, split, word_dic=None, answer_dic=None):
 if __name__ == '__main__':
     root = '/home/mshah1/workhorse3/clevr-dialog/data'
     data_dir = '../data/wHistory-keepTurns/'
+    concat_ctx = True
+    if concat_ctx:
+        data_dir = '../data/wHistory-keepTurns-concatCtx/'
+    word_dic, answer_dic = process_question(root, 'train', concat_ctx=concat_ctx)
+    process_question(root, 'val', word_dic, answer_dic, concat_ctx=concat_ctx)    
 
-    # word_dic, answer_dic = process_question(root, 'train')
-    # process_question(root, 'val', word_dic, answer_dic)    
-
-    # dict_dir = os.path.join(data_dir, 'dic.pkl')
-    # with open(dict_dir, 'wb') as f:
-    #     pickle.dump({'word_dic': word_dic, 'answer_dic': answer_dic}, f)
+    dict_dir = os.path.join(data_dir, 'dic.pkl')
+    with open(dict_dir, 'wb') as f:
+        pickle.dump({'word_dic': word_dic, 'answer_dic': answer_dic}, f)
         
     if os.path.exists(os.path.join(data_dir, 'dic.pkl')):        
         with open(os.path.join(data_dir, 'dic.pkl'), 'rb') as f:
             dicts = pickle.load(f)
-        process_question(root, 'test', dicts['word_dic'], dicts['answer_dic'])
+        process_question(root, 'test', dicts['word_dic'], dicts['answer_dic'], concat_ctx=concat_ctx)

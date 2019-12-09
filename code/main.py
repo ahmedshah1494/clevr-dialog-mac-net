@@ -13,9 +13,9 @@ import shutil
 dir_path = (os.path.abspath(os.path.join(os.path.realpath(__file__), './.')))
 sys.path.append(dir_path)
 
-from config import cfg, cfg_from_file
-from utils import mkdir_p
-from trainer import Trainer
+from code.config import cfg, cfg_from_file
+from code.utils import mkdir_p
+from code.trainer import Trainer
 
 
 def parse_args():
@@ -23,6 +23,8 @@ def parse_args():
     parser.add_argument('--cfg', dest='cfg_file', help='optional config file', default='shapes_train.yml', type=str)
     parser.add_argument('--gpu',  dest='gpu_id', type=str, default='0')
     parser.add_argument('--data_dir', dest='data_dir', type=str, default='')
+    parser.add_argument('--checkpoint_path', type=str)
+    parser.add_argument('--load_state_dict_only', action='store_true')
     parser.add_argument('--manualSeed', type=int, help='manual seed')
     args = parser.parse_args()
     return args
@@ -57,10 +59,10 @@ if __name__ == "__main__":
     if cfg.CUDA:
         torch.cuda.manual_seed_all(args.manualSeed)
 
-    if cfg.TRAIN.FLAG:
-        logdir = set_logdir(cfg.TRAIN.MAX_STEPS)
-        trainer = Trainer(logdir, cfg)
+    logdir = set_logdir(cfg.TRAIN.MAX_STEPS)
+    trainer = Trainer(logdir, cfg, args.checkpoint_path, args.load_state_dict_only)
+    if cfg.TRAIN.FLAG:        
         trainer.train()
     else:
-        raise NotImplementedError
+        trainer.evaluate()
 

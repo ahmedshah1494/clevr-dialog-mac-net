@@ -5,7 +5,7 @@ CUDA: True
 TRAIN:
     FLAG: True
     LEARNING_RATE: 0.0002
-    BATCH_SIZE: 128
+    BATCH_SIZE: 12
     MAX_EPOCHS: 25
     SNAPSHOT_INTERVAL: 1
     WEIGHT_INIT: "xavier_uniform"
@@ -15,9 +15,9 @@ TRAIN:
     USE_PREV_CONTROL: True
     MAX_STEPS: 8
     NUM_ANSWERS: 29
-
+    CLEVR_DIALOG: True
 DATASET:
-    DATA_DIR: 'data/'
+    DATA_DIR: 'data/wHistory-keepTurns'
 
 
 

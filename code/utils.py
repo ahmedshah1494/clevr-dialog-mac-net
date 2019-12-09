@@ -5,7 +5,7 @@ import glob
 import pickle
 
 from copy import deepcopy
-from config import cfg
+from code.config import cfg, cfg_from_file
 
 from torch.nn import init
 import torch
@@ -14,6 +14,7 @@ import torch.nn as nn
 from torch.nn import functional as F
 import torchvision.utils as vutils
 
+import os
 
 def save_model(model, optim, iter, model_dir, max_to_keep=None, model_name=""):
     checkpoint = {
@@ -30,7 +31,6 @@ def save_model(model, optim, iter, model_dir, max_to_keep=None, model_name=""):
         while len(checkpoint_list) > max_to_keep:
             os.remove(checkpoint_list[0])
             checkpoint_list = checkpoint_list[1:]
-
 
 def mkdir_p(path):
     try:

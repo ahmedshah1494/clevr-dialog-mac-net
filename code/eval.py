@@ -9,7 +9,7 @@ import os
 from tqdm import tqdm
 from multiprocessing import cpu_count
 
-from code.datasets import ClevrDataset, collate_fn
+from code.datasets import ClevrDataset, ClevrDialogDataset, collate_fn
 from code.config import cfg, cfg_from_file
 from code.utils import load_vocab
 from code.mac import MACNetwork
@@ -21,7 +21,7 @@ def load_model(cpfile):
     cpdir = os.path.join(os.path.dirname(cpfile), '../')
     [cfgfile] = [fn for fn in os.listdir(cpdir) if 'yml' == fn.split('.')[-1]]
     cfgfile = os.path.join(cpdir, cfgfile)
-
+        
     cfg_from_file(cfgfile)
     vocab = load_vocab(cfg)
     
@@ -42,8 +42,13 @@ def evaluate(args):
     if cfg.CUDA:
         model = model.cuda()
     
-    dataset_test = ClevrDataset(data_dir=args.data_dir, split='val')
-    dataloader_test = DataLoader(dataset=dataset_test, batch_size=512, drop_last=False,
+    if cfg.TRAIN.CLEVR_DIALOG:
+        dataset_test = ClevrDialogDataset(data_dir=args.data_dir, split="test")
+        dataloader_test = DataLoader(dataset=dataset_test, batch_size=128, drop_last=False,
+                                            shuffle=False, num_workers=cfg.WORKERS, collate_fn=ClevrDialogDataset.collate_fn)
+    else:
+        dataset_test = ClevrDataset(data_dir=args.data_dir, split='test')
+        dataloader_test = DataLoader(dataset=dataset_test, batch_size=512, drop_last=False,
                                     shuffle=False, num_workers=cpu_count(), collate_fn=collate_fn)
 
     total_correct = 0
@@ -64,7 +69,7 @@ def evaluate(args):
             answer = answer.cuda().squeeze()
 
         with torch.no_grad():
-            scores = model(image, question, question_len)
+            scores = model(image, question, question_len)        
 
         preds = scores.detach().argmax(1)        
         correct = preds == answer
@@ -73,7 +78,11 @@ def evaluate(args):
         total_correct += correct
         total += answer.shape[0]
         
-        predictions.append(preds.cpu().numpy())
+        if cfg.TRAIN.CLEVR_DIALOG:
+            preds = preds.view(10, -1).transpose(0,1).contiguous().view(-1)
+            answer = answer.view(10, -1).transpose(0,1).contiguous().view(-1)
+
+        predictions.append(preds.cpu().numpy())        
         gt_answers.append(answer.detach().cpu().numpy())
         t.set_postfix(acc=(total_correct/total))
 
@@ -83,19 +92,19 @@ def evaluate(args):
     predictions = np.concatenate(predictions, axis=0)
     gt_answers = np.concatenate(gt_answers, axis=0)
     
-    # outfile = args.checkpoint_file.replace('pth', 'preds')
-    # np.savetxt(outfile, predictions, fmt='%d')
+    outfile = args.checkpoint_file.replace('pth', 'preds')
+    np.savetxt(outfile, predictions, fmt='%d')
 
-    # predictions = [vocab['answer_idx_to_token'][a] for a in predictions]
-    # outfile = args.checkpoint_file.replace('pth', 'preds.txt')
-    # np.savetxt(outfile, predictions, fmt='%s')
+    predictions = [vocab['answer_idx_to_token'][a] for a in predictions]
+    outfile = args.checkpoint_file.replace('pth', 'preds.txt')
+    np.savetxt(outfile, predictions, fmt='%s')
 
-    # outfile = args.checkpoint_file.replace('pth', 'answers')
-    # np.savetxt(outfile, gt_answers, fmt='%d')
+    outfile = args.checkpoint_file.replace('pth', 'answers')
+    np.savetxt(outfile, gt_answers, fmt='%d')
 
-    # gt_answers = [vocab['answer_idx_to_token'][a] for a in gt_answers]
-    # outfile = args.checkpoint_file.replace('pth', 'answers.txt')
-    # np.savetxt(outfile, gt_answers, fmt='%s')
+    gt_answers = [vocab['answer_idx_to_token'][a] for a in gt_answers]
+    outfile = args.checkpoint_file.replace('pth', 'answers.txt')
+    np.savetxt(outfile, gt_answers, fmt='%s')
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()

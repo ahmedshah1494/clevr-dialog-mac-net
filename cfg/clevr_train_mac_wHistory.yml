@@ -17,7 +17,7 @@ TRAIN:
     NUM_ANSWERS: 29
 
 DATASET:
-    DATA_DIR: 'data/'
+    DATA_DIR: 'data/wHistory'
 
 
 

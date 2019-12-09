@@ -15,10 +15,10 @@ from torch.autograd import Variable
 import torch.optim as optim
 from torch.utils.data import DataLoader
 
-from utils import mkdir_p, save_model, load_vocab
-from datasets import ClevrDataset, collate_fn
-import mac
-
+from code.utils import mkdir_p, save_model, load_vocab
+from code.datasets import ClevrDataset, collate_fn, ClevrDialogDataset
+import code.mac as mac
+from code.eval import load_model
 
 class Logger(object):
     def __init__(self, logfile):
@@ -39,7 +39,7 @@ class Logger(object):
 
 
 class Trainer():
-    def __init__(self, log_dir, cfg):
+    def __init__(self, log_dir, cfg, cp_path=None, load_state_dict_only=False):
 
         self.path = log_dir
         self.cfg = cfg
@@ -67,19 +67,48 @@ class Trainer():
         cudnn.benchmark = True
 
         # load dataset
-        self.dataset = ClevrDataset(data_dir=self.data_dir, split="train")
-        self.dataloader = DataLoader(dataset=self.dataset, batch_size=cfg.TRAIN.BATCH_SIZE, shuffle=True,
-                                       num_workers=cfg.WORKERS, drop_last=True, collate_fn=collate_fn)
+        if cfg.TRAIN.CLEVR_DIALOG:
+            self.dataset = ClevrDialogDataset(data_dir=self.data_dir, split="train")
+            self.dataset_val = ClevrDialogDataset(data_dir=self.data_dir, split="val")
+            self.dataset_test = ClevrDialogDataset(data_dir=self.data_dir, split='test')
+            
+            self.dataloader = DataLoader(dataset=self.dataset, batch_size=cfg.TRAIN.BATCH_SIZE, shuffle=True,
+                                        num_workers=cfg.WORKERS, drop_last=True, collate_fn=ClevrDialogDataset.collate_fn)            
+            self.dataloader_val = DataLoader(dataset=self.dataset_val, batch_size=128, drop_last=True,
+                                            shuffle=False, num_workers=cfg.WORKERS, collate_fn=ClevrDialogDataset.collate_fn)            
+            self.dataloader_test = DataLoader(dataset=self.dataset_test, batch_size=128, drop_last=True,
+                                            shuffle=False, num_workers=cfg.WORKERS, collate_fn=ClevrDialogDataset.collate_fn)
+        else:
+            self.dataset = ClevrDataset(data_dir=self.data_dir, split="train")
+            self.dataset_val = ClevrDataset(data_dir=self.data_dir, split="val")
 
-        self.dataset_val = ClevrDataset(data_dir=self.data_dir, split="val")
-        self.dataloader_val = DataLoader(dataset=self.dataset_val, batch_size=200, drop_last=True,
-                                         shuffle=False, num_workers=cfg.WORKERS, collate_fn=collate_fn)
+            self.dataloader = DataLoader(dataset=self.dataset, batch_size=cfg.TRAIN.BATCH_SIZE, shuffle=True,
+                                        num_workers=cfg.WORKERS, drop_last=True, collate_fn=collate_fn)
+            
+            self.dataloader_val = DataLoader(dataset=self.dataset_val, batch_size=128, drop_last=True,
+                                            shuffle=False, num_workers=cfg.WORKERS, collate_fn=collate_fn)
+            self.dataset_test = ClevrDataset(data_dir=self.data_dir, split='test')
+            self.dataloader_test = DataLoader(dataset=self.dataset_test, batch_size=128, drop_last=True,
+                                            shuffle=False, num_workers=cfg.WORKERS, collate_fn=collate_fn)
 
         # load model
-        self.vocab = load_vocab(cfg)
-        self.model, self.model_ema = mac.load_MAC(cfg, self.vocab)
-        self.weight_moving_average(alpha=0)
-        self.optimizer = optim.Adam(self.model.parameters(), lr=self.lr)
+        
+        if cp_path is not None and not load_state_dict_only:
+            self.model, self.vocab, self.optimizer = load_model(cp_path)
+            self.model_ema = self.model
+        else:
+            self.vocab = load_vocab(cfg)
+            self.model, self.model_ema = mac.load_MAC(cfg, self.vocab)            
+            self.optimizer = optim.Adam(self.model.parameters(), lr=self.lr)
+            if cp_path is not None and load_state_dict_only:
+                print('loading state dict ...')
+                state_dict = torch.load(cp_path)['model']
+                self.model.load_state_dict(state_dict, strict=False)
+                self.model_ema.load_state_dict(state_dict, strict=False)
+            else:
+                self.weight_moving_average(alpha=0)
+        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, factor=0.5, patience=cfg.TRAIN.PATIENCE)
+        # print(self.calc_accuracy('validation'))
 
         self.previous_best_acc = 0.0
         self.previous_best_epoch = 0
@@ -192,7 +221,6 @@ class Trainer():
             dataset.set_description(
                 'Epoch: {}; Avg Loss: {:.5f}; Avg Train Acc: {:.5f}'.format(epoch + 1, avg_loss, train_accuracy)
             )
-
         dict = {
             "avg_loss": avg_loss,
             "train_accuracy": train_accuracy
@@ -204,8 +232,9 @@ class Trainer():
         print("Start Training")
         for epoch in range(self.max_epochs):
             dict = self.train_epoch(epoch)
-            self.reduce_lr()
-            self.log_results(epoch, dict)
+            # self.reduce_lr()
+            val_acc = self.log_results(epoch, dict)
+            self.scheduler.step(val_acc)
             if cfg.TRAIN.EALRY_STOPPING:
                 if epoch - cfg.TRAIN.PATIENCE == self.previous_best_epoch:
                     break
@@ -224,8 +253,12 @@ class Trainer():
         self.writer.add_scalar("val_accuracy_ema", val_accuracy_ema, epoch)
         self.writer.add_scalar("val_accuracy", val_accuracy, epoch)
 
-        print("Epoch: {}\tVal Acc: {},\tVal Acc EMA: {},\tAvg Loss: {},\tLR: {}".
-              format(epoch, val_accuracy, val_accuracy_ema, dict["avg_loss"], self.lr))
+        test_accuracy, test_accuracy_ema = self.calc_accuracy("test", max_samples=max_eval_samples)
+        self.writer.add_scalar("test_accuracy_ema", test_accuracy_ema, epoch)
+        self.writer.add_scalar("test_accuracy", test_accuracy, epoch)        
+
+        print("Epoch: {}\tVal Acc: {},\tVal Acc EMA: {},\tTest Acc: {},\tTest Acc EMA: {},\tAvg Loss: {},\tLR: {}".
+              format(epoch, val_accuracy, val_accuracy_ema, test_accuracy, test_accuracy_ema, dict["avg_loss"], self.lr))
 
         if val_accuracy > self.previous_best_acc:
             self.previous_best_acc = val_accuracy
@@ -233,6 +266,9 @@ class Trainer():
 
         if epoch % self.snapshot_interval == 0:
             self.save_models(epoch)
+        return val_accuracy
+    def evaluate(self, split='test'):
+        print(self.calc_accuracy(split))
 
     def calc_accuracy(self, mode="train", max_samples=None):
         self.set_mode("validation")
@@ -243,6 +279,9 @@ class Trainer():
         elif mode == "validation":
             eval_data = iter(self.dataloader_val)
             num_imgs = len(self.dataset_val)
+        elif mode == 'test':
+            eval_data = iter(self.dataloader_test)
+            num_imgs = len(self.dataset_test)
 
         batch_size = 200
         total_iters = num_imgs // batch_size
@@ -254,7 +293,7 @@ class Trainer():
         all_accuracies = []
         all_accuracies_ema = []
 
-        for _iteration in range(total_iters):
+        for _iteration in tqdm(range(total_iters)):
             try:
                 data = next(eval_data)
             except StopIteration:
