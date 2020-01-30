@@ -19,6 +19,7 @@ from code.utils import mkdir_p, save_model, load_vocab
 from code.datasets import ClevrDataset, collate_fn, ClevrDialogDataset
 import code.mac as mac
 from code.eval import load_model
+from copy import deepcopy
 
 class Logger(object):
     def __init__(self, logfile):
@@ -95,7 +96,11 @@ class Trainer():
         
         if cp_path is not None and not load_state_dict_only:
             self.model, self.vocab, self.optimizer = load_model(cp_path)
-            self.model_ema = self.model
+            ema_path = cp_path.replace('model_checkpoint','model_ema_checkpoint')
+            self.model_ema = deepcopy(self.model)
+            if os.path.exists(ema_path):
+                state_dict = torch.load(ema_path)['model']
+                self.model_ema.load_state_dict(state_dict, strict=False)            
         else:
             self.vocab = load_vocab(cfg)
             self.model, self.model_ema = mac.load_MAC(cfg, self.vocab)            
@@ -104,6 +109,9 @@ class Trainer():
                 print('loading state dict ...')
                 state_dict = torch.load(cp_path)['model']
                 self.model.load_state_dict(state_dict, strict=False)
+                ema_path = cp_path.replace('model_checkpoint','model_ema_checkpoint')
+                if os.path.exists(ema_path):
+                    state_dict = torch.load(ema_path)['model']
                 self.model_ema.load_state_dict(state_dict, strict=False)
             else:
                 self.weight_moving_average(alpha=0)
