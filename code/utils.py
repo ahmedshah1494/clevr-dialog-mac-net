@@ -70,11 +70,15 @@ def init_modules(modules, w_init='kaiming_uniform'):
                     _init(param)
 
 
-def load_vocab(cfg):
+def load_vocab(cfg):    
+    path = os.path.join(cfg.DATASET.DATA_DIR, 'dic.pkl')
+    return load_vocab_from_path(path)
+
+def load_vocab_from_path(path):
     def invert_dict(d):
         return {v: k for k, v in d.items()}
 
-    with open(os.path.join(cfg.DATASET.DATA_DIR, 'dic.pkl'), 'rb') as f:
+    with open(path, 'rb') as f:
         dictionaries = pickle.load(f)
     vocab = {}
     vocab['question_token_to_idx'] = dictionaries["word_dic"]
@@ -84,7 +88,6 @@ def load_vocab(cfg):
     vocab['answer_idx_to_token'] = invert_dict(vocab['answer_token_to_idx'])
 
     return vocab
-
 
 def generateVarDpMask(shape, keepProb):
     randomTensor = torch.tensor(keepProb).cuda().expand(shape)
