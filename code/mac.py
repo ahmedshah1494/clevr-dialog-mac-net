@@ -351,18 +351,30 @@ class ReferrentMACUnit(MACUnit):
         # print('control_history.shape', control_history.shape)
         
         attended_ch_val = self.compute_attended_control(control_history, true_bs, T)
-        
         if self.cfg.TRAIN.REENCODE_CONTROL:
             attended_ch_val, _ = self.reencoder(attended_ch_val)
 
-        for i in range(self.max_step):
-            # control unit
-            control = attended_ch_val[:, i]
-            # control = control_history[:, i]
-            # read unit
-            info = self.read(memory, knowledge, control, memDpMask)
-            # write unit
-            memory = self.write(memory, info)
+        if self.cfg.TRAIN.RETAIN_TURN_MEMORY:
+            _, memory, memDpMask = self.zero_state(true_bs, qemb)
+            attended_ch_val = attended_ch_val.view(T, true_bs, self.max_step, self.module_dim)
+            knowledge = knowledge.contiguous().view(T, true_bs, knowledge.shape[1], knowledge.shape[2])
+            memory_ = []
+            for t in range(T):
+                for i in range(self.max_step):
+                    control = attended_ch_val[t, :, i]
+                    info = self.read(memory, knowledge[t,:], control, memDpMask)
+                    memory = self.write(memory, info)
+                memory_.append(memory)
+            memory = torch.stack(memory_, dim=0).view(-1, *(memory.shape[1:]))            
+        else:
+            for i in range(self.max_step):
+                # control unit
+                control = attended_ch_val[:, i]
+                # control = control_history[:, i]
+                # read unit
+                info = self.read(memory, knowledge, control, memDpMask)
+                # write unit
+                memory = self.write(memory, info)
 
         return memory, control
 
@@ -449,7 +461,7 @@ class MACNetwork(nn.Module):
 
         self.output_unit = OutputUnit(num_answers=self.cfg.TRAIN.NUM_ANSWERS)
 
-        if self.cfg.TRAIN.CLEVR_DIALOG:
+        if self.cfg.TRAIN.CLEVR_DIALOG and self.cfg.TRAIN.USE_ATTENTION:
             self.mac = ReferrentMACUnit(cfg, max_step=max_step)
         else:
             self.mac = MACUnit(cfg, max_step=max_step)

@@ -35,15 +35,25 @@ __C.TRAIN.USE_QUERY_PROJ = False
 __C.TRAIN.GATE_CONTROL_ATTN = False
 __C.TRAIN.REENCODE_CONTROL = False
 __C.TRAIN.USE_TURN_EMBED = False
+__C.TRAIN.USE_ATTENTION = False
+__C.TRAIN.RETAIN_TURN_MEMORY = False
+__C.TRAIN.ATTEND_USING_QUESTION = False
 __C.TRAIN.MAX_TURNS = 10
 __C.TRAIN.TURN_EMBED_DIM = 16
 __C.TRAIN = dict(__C.TRAIN)
+
+# Reformulator Options
+__C.TRAIN.RL = edict()
+__C.TRAIN.RL.S2S_HIDDEN = 512
+__C.TRAIN.RL.S2S_EMB_DIM = 300
+
 
 # Dataset options
 __C.DATASET = edict()
 __C.DATASET.DATA_DIR = ''
 __C.DATASET = dict(__C.DATASET)
-
+__C.DATASET.RL = edict()
+__C.DATASET.RL.CLEVR_DATA_DIR = '/home/mshah1/workhorse3/clevr-dialog/macnet-data/clevr/'
 
 def _merge_a_into_b(a, b):
     """Merge config dictionary a into config dictionary b, clobbering the
