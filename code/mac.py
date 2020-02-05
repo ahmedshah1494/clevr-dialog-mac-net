@@ -8,7 +8,6 @@ from torch.autograd import Variable
 from pprint import pprint
 from .utils import init_modules
 
-
 def load_MAC(cfg, vocab):
     kwargs = {'vocab': vocab,
               'max_step': cfg.TRAIN.MAX_STEPS
@@ -224,14 +223,14 @@ class PositionalEncoding(nn.Module):
 
 class Fusion(nn.Module):
     """docstring for Fusion"""
-    def __init__(self, enc_dim):
+    def __init__(self, enc_dim=512):
         super(Fusion, self).__init__()
         
         self.projection = nn.Linear(4*enc_dim, enc_dim, bias=False)
         self.gate = nn.Linear(4*enc_dim, enc_dim, bias=False)
 
     def forward(self, x, y):
-        catted = torch.cat((x,y,x*y,x-y), dim=2)
+        catted = torch.cat((x,y,x*y,x-y), dim=-1)
         xt = F.relu(self.projection(catted))
         g = torch.sigmoid(self.gate(catted))
         o = g*xt + (1-g)*x
@@ -241,19 +240,14 @@ class ReferrentMACUnit(MACUnit):
     def __init__(self, cfg, module_dim=512, max_step=4):
         super(ReferrentMACUnit, self).__init__(cfg, module_dim=module_dim, max_step=max_step)
         if cfg.TRAIN.USE_TURN_EMBED:
-            # self.turn_embed = nn.Parameter(torch.rand((cfg.TRAIN.MAX_TURNS, 
-            #                                             cfg.TRAIN.TURN_EMBED_DIM), 
-            #                                 requires_grad=True))
-            # self.step_embed = nn.Parameter(torch.rand((max_step, 
-            #                                             cfg.TRAIN.TURN_EMBED_DIM), 
-            #                                 requires_grad=True))
-            self.pos_emb = PositionalEncoding(self.module_dim, max_len=cfg.TRAIN.MAX_TURNS*max_step)            
-
-        #     self.kq_proj = nn.Linear(module_dim+2*cfg.TRAIN.TURN_EMBED_DIM, (2 if cfg.TRAIN.USE_QUERY_PROJ else 1)*module_dim)
-        #     self.val_proj = nn.Linear(module_dim+2*cfg.TRAIN.TURN_EMBED_DIM, module_dim)
-        # else:
+            self.pos_emb = PositionalEncoding(self.module_dim, max_len=cfg.TRAIN.MAX_TURNS*max_step)
+        
         self.kq_proj = nn.Linear(module_dim, (2 if cfg.TRAIN.USE_QUERY_PROJ else 1)*module_dim)
         self.val_proj = nn.Linear(module_dim, module_dim)
+        if cfg.TRAIN.ATTEND_USING_QUESTION:
+            self.qatt_kq = nn.Linear(module_dim, (2 if cfg.TRAIN.USE_QUERY_PROJ else 1)*module_dim)
+            self.qatt_val = nn.Linear(module_dim, module_dim)
+            self.qatt_gate = Fusion(self.module_dim)
         
         if cfg.TRAIN.GATE_CONTROL_ATTN:
             self.gate = Fusion(self.module_dim)
@@ -278,11 +272,21 @@ class ReferrentMACUnit(MACUnit):
     def compute_attended_control(self, control_history, true_bs, T):
         ch_proj = self.kq_proj(control_history)
         ch_proj = ch_proj.view(-1, self.module_dim)
+        ch_val = self.val_proj(control_history)
+        attended_ch_val = self.attend(ch_proj, ch_val, true_bs, T, self.max_step)
+
+        if self.cfg.TRAIN.GATE_CONTROL_ATTN:
+            gated_ch_val = self.gate(control_history, attended_ch_val)
+            return gated_ch_val
+        else:
+            return attended_ch_val
+
+    def attend(self, ch_proj, ch_val, true_bs, T, max_step):
         normed_ch_proj = ch_proj / torch.norm(ch_proj, dim=1, keepdim=True)
         
         normed_ch_proj = normed_ch_proj.view(T, 
                                             true_bs, 
-                                            self.max_step, 
+                                            max_step, 
                                             (2 if self.cfg.TRAIN.USE_QUERY_PROJ else 1), 
                                             self.module_dim)
         normed_ch_proj = torch.transpose(normed_ch_proj, 1, 0)
@@ -294,62 +298,59 @@ class ReferrentMACUnit(MACUnit):
         else:
             normed_ch_key = normed_ch_query = normed_ch_proj
 
-        normed_ch_key = normed_ch_key.contiguous().view(true_bs, T*self.max_step, self.module_dim)
-        normed_ch_query = normed_ch_query.contiguous().view(true_bs, T*self.max_step, self.module_dim)
+        normed_ch_key = normed_ch_key.contiguous().view(true_bs, T*max_step, self.module_dim)
+        normed_ch_query = normed_ch_query.contiguous().view(true_bs, T*max_step, self.module_dim)
 
-        mask = self.compute_triu_mask(T*self.max_step).to(normed_ch_key.device)
+        mask = self.compute_triu_mask(T*max_step).to(normed_ch_key.device)
         A = self.compute_general_attention(normed_ch_key, normed_ch_query, mask)
         # print('A.shape',A.shape)
-
-        ch_val = self.val_proj(control_history)
-        new_shape = (T, true_bs, self.max_step, self.module_dim)
+        
+        new_shape = (T, true_bs, max_step, self.module_dim)
         ch_val = ch_val.view(*new_shape)
         ch_val = ch_val.transpose(1,0)
-        ch_val = ch_val.contiguous().view(true_bs, T*self.max_step, self.module_dim)
+        ch_val = ch_val.contiguous().view(true_bs, T*max_step, self.module_dim)
         # print('ch_val.shape', ch_val.shape)
         
         attended_ch_val = torch.bmm(A, ch_val)
-        attended_ch_val = attended_ch_val.view(true_bs, T, self.max_step, self.module_dim)
+        attended_ch_val = attended_ch_val.view(true_bs, T, max_step, self.module_dim)
         attended_ch_val = attended_ch_val.transpose(0,1)
-        attended_ch_val = attended_ch_val.contiguous().view(T*true_bs, self.max_step, -1)
+        attended_ch_val = attended_ch_val.contiguous().view(T*true_bs, max_step, -1)
         # print('attended_ch_val.shape', attended_ch_val.shape)
-        # return attended_ch_val
-        if self.cfg.TRAIN.GATE_CONTROL_ATTN:
-            gated_ch_val = self.gate(control_history, attended_ch_val)
-            return gated_ch_val
-        else:
-            return attended_ch_val
+        return attended_ch_val
+
         
+    def compute_question_attention(self, qemb, true_bs, T):
+        q_proj = self.qatt_kq(qemb)
+        q_proj.view(-1, self.module_dim)
+        q_val = self.qatt_val(qemb)
+
+        attended_q_val = self.attend(q_proj, qemb, true_bs, T, 1)
+        attended_q_val = attended_q_val.view(*(qemb.shape))
+        gated_q_val = self.qatt_gate(qemb, attended_q_val)
+        return gated_q_val
+
 
     def forward(self, qword_emb, qemb, knowledge, question_lengths):
         batch_size = qemb.size(0)
         control, memory, memDpMask = self.zero_state(batch_size, qemb)
+        true_bs = question_lengths.shape[1]
+        T = question_lengths.shape[0]
 
         control_history = []
+
+        if self.cfg.TRAIN.ATTEND_USING_QUESTION:
+            qemb = self.compute_question_attention(qemb, true_bs, T)
 
         for i in range(self.max_step):
             # control unit
             control = self.control(qemb, qword_emb, control, question_lengths, i)
-            control_history.append(control)
-
-        true_bs = question_lengths.shape[1]
-        T = question_lengths.shape[0]
+            control_history.append(control)        
 
         control_history = torch.stack(control_history, 1)
         if self.cfg.TRAIN.USE_TURN_EMBED:
             control_history = control_history.view(T, true_bs, self.max_step, -1).transpose(1,2).contiguous().view(T*self.max_step, true_bs, -1)            
             control_history = self.pos_emb(control_history).view(T, self.max_step, true_bs, -1).transpose(1,2).contiguous().view(T*true_bs, self.max_step, -1)
-            
-            
-            # control_history = self.turn_emb(control_history.view(T, true_bs*self.max_step, -1)).view(T*true_bs, self.max_step, -1)
-            # control_history = self.step_emb(control_history.transpose(0,1)).transpose(0,1)
 
-            # turn_emb = self.turn_embed.repeat_interleave(true_bs*self.max_step, 0).view(T*true_bs, self.max_step, -1)
-            # step_emb = self.step_embed.repeat((true_bs*T, 1)).view(T*true_bs, self.max_step, -1)
-            # pos_emb = torch.cat([step_emb, turn_emb], dim=2)
-            # control_history = torch.cat([control_history, pos_emb], dim=2)        
-        # print('control_history.shape', control_history.shape)
-        
         attended_ch_val = self.compute_attended_control(control_history, true_bs, T)
         if self.cfg.TRAIN.REENCODE_CONTROL:
             attended_ch_val, _ = self.reencoder(attended_ch_val)
@@ -465,7 +466,8 @@ class MACNetwork(nn.Module):
             self.mac = ReferrentMACUnit(cfg, max_step=max_step)
         else:
             self.mac = MACUnit(cfg, max_step=max_step)
-
+        if cfg.TRAIN.FUSION_WRITE_GATE:
+            self.mac.write = Fusion()
         init_modules(self.modules(), w_init=self.cfg.TRAIN.WEIGHT_INIT)
         nn.init.uniform_(self.input_unit.encoder_embed.weight, -1.0, 1.0)
         nn.init.normal_(self.mac.initial_memory)
