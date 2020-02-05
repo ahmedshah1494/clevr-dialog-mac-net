@@ -40,7 +40,7 @@ class Logger(object):
 
 
 class Trainer():
-    def __init__(self, log_dir, cfg, cp_path=None, load_state_dict_only=False):
+    def __init__(self, log_dir, cfg, cp_path=None, load_state_dict_only=False, tune_new_modules_only=False):
 
         self.path = log_dir
         self.cfg = cfg
@@ -95,24 +95,19 @@ class Trainer():
         # load model
         
         if cp_path is not None and not load_state_dict_only:
-            self.model, self.vocab, self.optimizer = load_model(cp_path)
-            ema_path = cp_path.replace('model_checkpoint','model_ema_checkpoint')
-            self.model_ema = deepcopy(self.model)
-            if os.path.exists(ema_path):
-                state_dict = torch.load(ema_path)['model']
-                self.model_ema.load_state_dict(state_dict, strict=False)            
+            self.model, self.vocab, self.optimizer = load_model(cp_path)            
+            self.model_ema = deepcopy(self.model)         
         else:
             self.vocab = load_vocab(cfg)
             self.model, self.model_ema = mac.load_MAC(cfg, self.vocab)            
             self.optimizer = optim.Adam(self.model.parameters(), lr=self.lr)
             if cp_path is not None and load_state_dict_only:
                 print('loading state dict ...')
-                state_dict = torch.load(cp_path)['model']
-                self.model.load_state_dict(state_dict, strict=False)
-                ema_path = cp_path.replace('model_checkpoint','model_ema_checkpoint')
-                if os.path.exists(ema_path):
-                    state_dict = torch.load(ema_path)['model']
-                self.model_ema.load_state_dict(state_dict, strict=False)
+                self.state_dict = torch.load(cp_path)['model']
+                self.model.load_state_dict(self.state_dict, strict=False)
+                self.model_ema.load_state_dict(self.state_dict, strict=False)
+                if tune_new_modules_only:
+                    self.toggle_pretrained_modules_training(False)
             else:
                 self.weight_moving_average(alpha=0)
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, factor=0.5, patience=cfg.TRAIN.PATIENCE)
@@ -126,6 +121,13 @@ class Trainer():
 
         self.print_info()
         self.loss_fn = torch.nn.CrossEntropyLoss().cuda()
+
+    def toggle_pretrained_modules_training(self, train):
+        for (n1,p1),(n2,p2) in zip(self.model.named_parameters(), self.model_ema.named_parameters()):
+            if n1 not in self.state_dict:
+                p1.requires_grad = train
+            if n2 not in self.state_dict:
+                p2.requires_grad = train
 
     def print_info(self):
         print('Using config:')
@@ -246,6 +248,7 @@ class Trainer():
             if cfg.TRAIN.EALRY_STOPPING:
                 if epoch - cfg.TRAIN.PATIENCE == self.previous_best_epoch:
                     break
+            self.toggle_pretrained_modules_training(True)
 
         self.save_models(self.max_epochs)
         self.writer.close()

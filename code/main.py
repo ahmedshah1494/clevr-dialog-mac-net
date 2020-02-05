@@ -25,6 +25,7 @@ def parse_args():
     parser.add_argument('--data_dir', dest='data_dir', type=str, default='')
     parser.add_argument('--checkpoint_path', type=str)
     parser.add_argument('--load_state_dict_only', action='store_true')
+    parser.add_argument('--tune_new_modules_only', action='store_true')
     parser.add_argument('--manualSeed', type=int, help='manual seed')
     args = parser.parse_args()
     return args
@@ -60,7 +61,7 @@ if __name__ == "__main__":
         torch.cuda.manual_seed_all(args.manualSeed)
 
     logdir = set_logdir(cfg.TRAIN.MAX_STEPS)
-    trainer = Trainer(logdir, cfg, args.checkpoint_path, args.load_state_dict_only)
+    trainer = Trainer(logdir, cfg, args.checkpoint_path, args.load_state_dict_only, args.tune_new_modules_only)
     if cfg.TRAIN.FLAG:        
         trainer.train()
     else:
