@@ -248,7 +248,7 @@ class Trainer():
             if cfg.TRAIN.EALRY_STOPPING:
                 if epoch - cfg.TRAIN.PATIENCE == self.previous_best_epoch:
                     break
-            self.toggle_pretrained_modules_training(True)
+            # self.toggle_pretrained_modules_training(True)
 
         self.save_models(self.max_epochs)
         self.writer.close()

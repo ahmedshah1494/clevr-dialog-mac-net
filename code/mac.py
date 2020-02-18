@@ -150,7 +150,7 @@ class ReadUnit(nn.Module):
         attn = attn.unsqueeze(-1)
         read = (attn * know).sum(1)
 
-        return read
+        return read, attn
 
 
 class WriteUnit(nn.Module):
@@ -192,16 +192,21 @@ class MACUnit(nn.Module):
 
     def forward(self, qword_emb, qemb, knowledge, question_lengths):  
         batch_size = qemb.size(0)
-        control, memory, memDpMask = self.zero_state(batch_size, qemb)        
+        control, memory, memDpMask = self.zero_state(batch_size, qemb)
+        control_history = []
         for i in range(self.max_step):
             # control unit
             control = self.control(qemb, qword_emb, control, question_lengths, i)
             # read unit
-            info = self.read(memory, knowledge, control, memDpMask)
+            info, _ = self.read(memory, knowledge, control, memDpMask)
             # write unit
             memory = self.write(memory, info)
-
-        return memory, control
+            control_history.append(control.detach().cpu())
+        control_history = torch.stack(control_history, dim=1)
+        if self.cfg.EVAL.RETURN_ATTENTION_MAPS:            
+            return memory, control_history, [], []
+        else:
+            return memory, control
 
 class PositionalEncoding(nn.Module):
 
@@ -242,8 +247,9 @@ class ReferrentMACUnit(MACUnit):
         if cfg.TRAIN.USE_TURN_EMBED:
             self.pos_emb = PositionalEncoding(self.module_dim, max_len=cfg.TRAIN.MAX_TURNS*max_step)
         
-        self.kq_proj = nn.Linear(module_dim, (2 if cfg.TRAIN.USE_QUERY_PROJ else 1)*module_dim)
-        self.val_proj = nn.Linear(module_dim, module_dim)
+        if self.cfg.TRAIN.USE_ATTENTION:
+            self.kq_proj = nn.Linear(module_dim, (2 if cfg.TRAIN.USE_QUERY_PROJ else 1)*module_dim)
+            self.val_proj = nn.Linear(module_dim, module_dim)
         if cfg.TRAIN.ATTEND_USING_QUESTION:
             self.qatt_kq = nn.Linear(module_dim, (2 if cfg.TRAIN.USE_QUERY_PROJ else 1)*module_dim)
             self.qatt_val = nn.Linear(module_dim, module_dim)
@@ -273,13 +279,13 @@ class ReferrentMACUnit(MACUnit):
         ch_proj = self.kq_proj(control_history)
         ch_proj = ch_proj.view(-1, self.module_dim)
         ch_val = self.val_proj(control_history)
-        attended_ch_val = self.attend(ch_proj, ch_val, true_bs, T, self.max_step)
+        attended_ch_val, A = self.attend(ch_proj, ch_val, true_bs, T, self.max_step)
 
         if self.cfg.TRAIN.GATE_CONTROL_ATTN:
             gated_ch_val = self.gate(control_history, attended_ch_val)
-            return gated_ch_val
+            return gated_ch_val, A
         else:
-            return attended_ch_val
+            return attended_ch_val, A
 
     def attend(self, ch_proj, ch_val, true_bs, T, max_step):
         normed_ch_proj = ch_proj / torch.norm(ch_proj, dim=1, keepdim=True)
@@ -316,7 +322,10 @@ class ReferrentMACUnit(MACUnit):
         attended_ch_val = attended_ch_val.transpose(0,1)
         attended_ch_val = attended_ch_val.contiguous().view(T*true_bs, max_step, -1)
         # print('attended_ch_val.shape', attended_ch_val.shape)
-        return attended_ch_val
+        if self.cfg.EVAL.RETURN_ATTENTION_MAPS:
+            return attended_ch_val, A
+        else:
+            return attended_ch_val, None
 
         
     def compute_question_attention(self, qemb, true_bs, T):
@@ -350,8 +359,17 @@ class ReferrentMACUnit(MACUnit):
         if self.cfg.TRAIN.USE_TURN_EMBED:
             control_history = control_history.view(T, true_bs, self.max_step, -1).transpose(1,2).contiguous().view(T*self.max_step, true_bs, -1)            
             control_history = self.pos_emb(control_history).view(T, self.max_step, true_bs, -1).transpose(1,2).contiguous().view(T*true_bs, self.max_step, -1)
+        
+        if self.cfg.TRAIN.USE_ATTENTION:
+            if self.cfg.EVAL.RETURN_ATTENTION_MAPS:
+                attended_ch_val, ch_attn_map = self.compute_attended_control(control_history, true_bs, T)            
+                ch_attn_map = ch_attn_map.view(true_bs, T, self.max_step, T*self.max_step)
+            else:
+                attended_ch_val, _ = self.compute_attended_control(control_history, true_bs, T)
+        else:
+            attended_ch_val = control_history
+            ch_attn_map = None
 
-        attended_ch_val = self.compute_attended_control(control_history, true_bs, T)
         if self.cfg.TRAIN.REENCODE_CONTROL:
             attended_ch_val, _ = self.reencoder(attended_ch_val)
 
@@ -360,24 +378,46 @@ class ReferrentMACUnit(MACUnit):
             attended_ch_val = attended_ch_val.view(T, true_bs, self.max_step, self.module_dim)
             knowledge = knowledge.contiguous().view(T, true_bs, knowledge.shape[1], knowledge.shape[2])
             memory_ = []
+            know_attn_maps = []
             for t in range(T):
+                turn_know_attn_maps = []
                 for i in range(self.max_step):
                     control = attended_ch_val[t, :, i]
-                    info = self.read(memory, knowledge[t,:], control, memDpMask)
+                    if self.cfg.EVAL.RETURN_ATTENTION_MAPS:
+                        info, know_attn = self.read(memory, knowledge[t,:], control, memDpMask)
+                        turn_know_attn_maps.append(know_attn)
+                    else:
+                        info, _ = self.read(memory, knowledge[t,:], control, memDpMask)
                     memory = self.write(memory, info)
                 memory_.append(memory)
-            memory = torch.stack(memory_, dim=0).view(-1, *(memory.shape[1:]))            
+                if len(turn_know_attn_maps) > 0:
+                    turn_know_attn_maps = torch.stack(turn_know_attn_maps, dim=1)                    
+                    know_attn_maps.append(turn_know_attn_maps)
+
+            memory = torch.stack(memory_, dim=0).view(-1, *(memory.shape[1:]))
+            if len(know_attn_maps) > 0:
+                know_attn_maps = torch.stack(know_attn_maps, dim=0).transpose(0,1)
         else:
+            know_attn_maps = []
             for i in range(self.max_step):
                 # control unit
                 control = attended_ch_val[:, i]
                 # control = control_history[:, i]
                 # read unit
-                info = self.read(memory, knowledge, control, memDpMask)
+                if self.cfg.EVAL.RETURN_ATTENTION_MAPS:
+                    info, know_attn = self.read(memory, knowledge, control, memDpMask)
+                    know_attn = know_attn.view(T,true_bs,*(know_attn.shape[1:]))
+                    know_attn_maps.append(know_attn)
+                else:
+                    info, _  = self.read(memory, knowledge, control, memDpMask)
                 # write unit
                 memory = self.write(memory, info)
-
-        return memory, control
+            if len(know_attn_maps) > 0:
+                know_attn_maps = torch.stack(know_attn_maps, dim=2).transpose(0,1)
+        if self.cfg.EVAL.RETURN_ATTENTION_MAPS:
+            return memory, attended_ch_val, ch_attn_map, know_attn_maps
+        else:
+            return memory, attended_ch_val
 
 class InputUnit(nn.Module):
     def __init__(self, cfg, vocab_size, wordvec_dim=300, rnn_dim=512, module_dim=512, bidirectional=True):
@@ -462,7 +502,7 @@ class MACNetwork(nn.Module):
 
         self.output_unit = OutputUnit(num_answers=self.cfg.TRAIN.NUM_ANSWERS)
 
-        if self.cfg.TRAIN.CLEVR_DIALOG and self.cfg.TRAIN.USE_ATTENTION:
+        if self.cfg.TRAIN.CLEVR_DIALOG:# and self.cfg.TRAIN.USE_ATTENTION:
             self.mac = ReferrentMACUnit(cfg, max_step=max_step)
         else:
             self.mac = MACUnit(cfg, max_step=max_step)
@@ -477,9 +517,15 @@ class MACNetwork(nn.Module):
         question_embedding, contextual_words, img = self.input_unit(image, question, question_len)
 
         # apply MacCell
-        memory,_ = self.mac(contextual_words, question_embedding, img, question_len)
+        if self.cfg.EVAL.RETURN_ATTENTION_MAPS:
+            memory,control_history, ch_attn_maps, know_attn_maps = self.mac(contextual_words, question_embedding, img, question_len)
+        else:
+            memory,_ = self.mac(contextual_words, question_embedding, img, question_len)
 
         # get classification
         out = self.output_unit(question_embedding, memory)
 
-        return out
+        if self.cfg.EVAL.RETURN_ATTENTION_MAPS:
+            return out, control_history, ch_attn_maps, know_attn_maps
+        else:
+            return out
