@@ -19,11 +19,11 @@ TRAIN:
     USE_ATTENTION: True
     USE_PREV_CONTROL: True
     USE_QUERY_PROJ: True
-    USE_TURN_EMBED: False
-    REENCODE_CONTROL: False
     GATE_CONTROL_ATTN: True
+    RETAIN_TURN_MEMORY: True
+    FUSION_WRITE_GATE: True
 DATASET:
-    DATA_DIR: '/home/mshah1/workhorse3/clevr-dialog/macnet-data/data/wHistory-keepTurns'
+    DATA_DIR: '/home/mshah1/workhorse3/clevr-dialog/macnet-data/data/wHistory-keepTurns-concatCtx'
 
 
 

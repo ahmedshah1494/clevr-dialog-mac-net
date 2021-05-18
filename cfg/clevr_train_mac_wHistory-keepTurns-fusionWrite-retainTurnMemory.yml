@@ -5,7 +5,7 @@ CUDA: True
 TRAIN:
     FLAG: True
     LEARNING_RATE: 0.0002
-    BATCH_SIZE: 128
+    BATCH_SIZE: 12
     MAX_EPOCHS: 25
     SNAPSHOT_INTERVAL: 1
     WEIGHT_INIT: "xavier_uniform"
@@ -15,9 +15,15 @@ TRAIN:
     USE_PREV_CONTROL: True
     MAX_STEPS: 8
     NUM_ANSWERS: 29
-
+    CLEVR_DIALOG: True
+    USE_ATTENTION: True
+    USE_PREV_CONTROL: True
+    USE_QUERY_PROJ: True
+    GATE_CONTROL_ATTN: True
+    RETAIN_TURN_MEMORY: True
+    FUSION_WRITE_GATE: True
 DATASET:
-    DATA_DIR: '/home/mshah1/workhorse3/clevr-dialog/macnet-data/data/'
+    DATA_DIR: '/home/mshah1/workhorse3/clevr-dialog/macnet-data/data/wHistory-keepTurns'
 
 
 
